@@ -1,0 +1,147 @@
+#!/bin/bash
+# bite-mode: switch the Pi between Bite Launcher mode and the regular Raspberry Pi desktop.
+#
+#   bite-mode toggle     Launcher running -> desktop, otherwise -> launcher
+#   bite-mode launcher   Stop the desktop extras, start the Bite Launcher, turn its autostart on
+#   bite-mode desktop    Turn Bite Launcher autostart off, stop it (and BiteDJ), bring back panel + desktop
+#   bite-mode boot       Run from labwc autostart: trims the desktop extras if the launcher is up
+#   bite-mode status     Print the current mode
+#
+# Settings are read from /etc/djrig.conf (all optional):
+#   BITE_MODE_DESKTOP="pcmanfm-pi wf-panel-pi"   desktop programs stopped in launcher mode
+#   BITE_MODE_EXTRA_STOP=""                      more programs to stop in launcher mode (not restarted)
+#   BITE_MODE_CLOSE_BITEDJ=1                     1 = close BiteDJ when switching to the desktop
+set -u
+. /etc/djrig.conf 2>/dev/null
+
+ME=$(id -un)
+LAUNCHER=${BITE_MODE_LAUNCHER:-/usr/local/bin/bitedj-launcher}
+LAUNCHER_PY=${BITE_MODE_LAUNCHER_PY:-/opt/bitedj-launcher/bitedj_launcher.py}
+DESKTOP_APPS=${BITE_MODE_DESKTOP:-"pcmanfm-pi wf-panel-pi"}
+EXTRA_STOP=${BITE_MODE_EXTRA_STOP:-}
+CLOSE_BITEDJ=${BITE_MODE_CLOSE_BITEDJ:-1}
+LOG=${BITE_MODE_LOG:-$HOME/bitedj-hold.log}
+# Present = Bite Launcher doesn't start at login, so the Pi boots into whichever mode was used last.
+# Shared with the Bite Launcher (Ctrl+Alt+D sets it, its desktop shortcut clears it).
+AUTOSTART_OFF="$HOME/.config/bite-launcher/autostart-off"
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+
+log() { echo "$(date '+%F %T') bite-mode: $*" >> "$LOG"; }
+mine() { pgrep -u "$ME" "$@" >/dev/null; }
+
+# Copy the live desktop session's environment (WAYLAND_DISPLAY, DBus, theme vars),
+# so programs started from the systemd service look the same as ones labwc started.
+import_session_env() {
+  local pid=""
+  for name in wf-panel-pi pcmanfm-pi kanshi swaybg; do
+    pid=$(pgrep -u "$ME" -x "$name" | head -1); [ -n "$pid" ] && break
+  done
+  [ -z "$pid" ] && pid=$(pgrep -u "$ME" -f "$LAUNCHER_PY" | head -1)
+  [ -z "$pid" ] && pid=$(pgrep -u "$ME" -x labwc | head -1)
+  if [ -n "$pid" ] && [ -r "/proc/$pid/environ" ]; then
+    while IFS= read -r -d '' kv; do
+      case "$kv" in
+        WAYLAND_DISPLAY=*|DISPLAY=*|DBUS_SESSION_BUS_ADDRESS=*|XDG_*=*|GTK_*=*|QT_*=*|XCURSOR_*=*|LABWC_*=*|PATH=*|LANG=*|LC_*=*)
+          export "$kv" ;;
+      esac
+    done < "/proc/$pid/environ"
+  fi
+  if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    for s in "$XDG_RUNTIME_DIR"/wayland-*; do
+      [ -S "$s" ] && { export WAYLAND_DISPLAY=$(basename "$s"); break; }
+    done
+  fi
+  export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
+}
+
+# Start a program fully detached, so restarting the hold service never closes it
+spawn() { setsid -f "$@" >/dev/null 2>&1 < /dev/null 9>&-; }
+
+launcher_running() { mine -f "$LAUNCHER_PY"; }
+
+bitedj_pattern() {
+  local p="/usr/local/bin/bitedj|/opt/bitedj/|$HOME/bitedj/build/mixxx"
+  case "${DJRIG_APP:-}" in /*) p="$p|${DJRIG_APP}" ;; esac
+  echo "^($p)"
+}
+
+stop_desktop() {
+  local app
+  for app in $DESKTOP_APPS; do
+    # Kill the respawn loop first, or labwc's lwrespawn brings the program back in 1 s
+    pkill -u "$ME" -f "lwrespawn .*$app" 2>/dev/null
+    pkill -u "$ME" -x "$app" 2>/dev/null
+  done
+  # pcmanfm-pi is only a wrapper script: the desktop it draws (pcmanfm --desktop, or swaybg
+  # for the wallpaper) keeps running after the script is killed, so stop those too
+  case " $DESKTOP_APPS " in
+    *" pcmanfm-pi "*)
+      pkill -u "$ME" -f '(^|/)pcmanfm --desktop' 2>/dev/null
+      pkill -u "$ME" -f '(^|/)swaybg -m ' 2>/dev/null ;;   # never the launcher's "swaybg -c #000000"
+  esac
+  for app in $EXTRA_STOP; do pkill -u "$ME" -x "$app" 2>/dev/null; done
+}
+
+start_desktop() {
+  local app
+  pkill -u "$ME" -f '(^|/)swaybg -c #000000' 2>/dev/null   # launcher's black backdrop
+  for app in $DESKTOP_APPS; do
+    mine -x "$app" && continue
+    if [ -x /usr/bin/lwrespawn ]; then spawn /usr/bin/lwrespawn "/usr/bin/$app"
+    else spawn "/usr/bin/$app"; fi
+  done
+}
+
+# The wrapper restarts the launcher after 1 s, so it goes first
+stop_launcher_wrapper() { pkill -u "$ME" -f "$LAUNCHER" 2>/dev/null; }
+stop_launcher() { pkill -u "$ME" -f "$LAUNCHER_PY" 2>/dev/null; }
+
+stop_bitedj() {
+  local pat; pat=$(bitedj_pattern)
+  mine -f "$pat" || return 0
+  log "closing BiteDJ"
+  pkill -TERM -u "$ME" -f "$pat"
+  for _ in $(seq 1 30); do mine -f "$pat" || return 0; sleep 0.5; done
+  log "BiteDJ did not close in 15 s, forcing it"
+  pkill -KILL -u "$ME" -f "$pat"
+}
+
+start_launcher() {
+  if [ ! -x "$LAUNCHER" ] && [ ! -f "$LAUNCHER_PY" ]; then
+    log "Bite Launcher not installed ($LAUNCHER)"; return 1
+  fi
+  mine -f '(^|/)swaybg -c #000000' || { command -v swaybg >/dev/null && spawn swaybg -c '#000000'; }
+  if [ -x "$LAUNCHER" ]; then spawn "$LAUNCHER"
+  else spawn python3 "$LAUNCHER_PY"; fi
+}
+
+to_launcher() {
+  log "switching to Bite Launcher (autostart on)"
+  rm -f "$AUTOSTART_OFF"
+  stop_desktop
+  start_launcher
+  sleep 2; stop_desktop   # catch anything that was mid-respawn
+}
+
+to_desktop() {
+  log "switching to Pi desktop (autostart off)"
+  mkdir -p "$(dirname "$AUTOSTART_OFF")" && touch "$AUTOSTART_OFF"
+  stop_launcher_wrapper
+  [ "$CLOSE_BITEDJ" = 1 ] && stop_bitedj
+  stop_launcher
+  start_desktop
+}
+
+cmd=${1:-toggle}
+import_session_env
+exec 9> "$XDG_RUNTIME_DIR/bite-mode.lock"
+flock -n 9 || { log "already switching, ignored"; exit 0; }
+
+case "$cmd" in
+  toggle)   if launcher_running; then to_desktop; else to_launcher; fi ;;
+  launcher) to_launcher ;;
+  desktop)  to_desktop ;;
+  boot)     for _ in 1 2 3; do sleep 3; launcher_running && stop_desktop; done ;;
+  status)   if launcher_running; then echo launcher; else echo desktop; fi ;;
+  *) echo "usage: bite-mode [toggle|launcher|desktop|boot|status]" >&2; exit 2 ;;
+esac

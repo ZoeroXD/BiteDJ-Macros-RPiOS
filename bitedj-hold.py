@@ -3,15 +3,20 @@
 
 Hold both Loop In buttons to start BiteDJ (a Mixxx build).
 Hold both Loop Out buttons to stop it.
+Hold both 4 BEAT/EXIT buttons to switch between the Bite Launcher and the
+regular Raspberry Pi desktop (runs ~/bin/bite-mode toggle).
 """
 import subprocess, select, time, re, os
 
 START_HOLD = 3.0
 STOP_HOLD = 8.0
+MODE_HOLD = 8.0
+BITE_MODE = os.path.expanduser("~/bin/bite-mode")
 MIXXX = os.path.expanduser("~/bitedj/build/mixxx")
 MATCH = "^" + MIXXX
 PORT = "DDJ-FLX4"
 LOOP_IN, LOOP_OUT = 16, 17
+BEAT4_EXIT = 77  # 0x4D, the 4 BEAT/EXIT button
 CHANNELS = (0, 1)
 LOG = os.path.expanduser("~/bitedj-hold.log")
 pat = re.compile(r"Note (on|off)\s+(\d+), note (\d+)(?:, velocity (\d+))?")
@@ -40,7 +45,18 @@ def stop():
     log("stopping BiteDJ")
     subprocess.run(["pkill", "-TERM", "-f", MATCH])
 
-ACTIONS = ((LOOP_IN, start, START_HOLD), (LOOP_OUT, stop, STOP_HOLD))
+def switch_mode():
+    if not os.path.exists(BITE_MODE):
+        log("mode switch failed: " + BITE_MODE + " not found")
+        return
+    log("mode switch requested")
+    subprocess.Popen([BITE_MODE, "toggle"], env=dict(os.environ),
+                     stdout=subprocess.DEVNULL, stderr=open(LOG, "a"),
+                     start_new_session=True)
+
+ACTIONS = ((LOOP_IN, start, START_HOLD), (LOOP_OUT, stop, STOP_HOLD),
+           (BEAT4_EXIT, switch_mode, MODE_HOLD))
+NOTES = {a[0] for a in ACTIONS}
 
 def watch():
     p = subprocess.Popen(["stdbuf", "-oL", "aseqdump", "-p", PORT],
@@ -54,7 +70,7 @@ def watch():
             if m:
                 on = m.group(1) == "on" and m.group(4) != "0"
                 ch, note = int(m.group(2)), int(m.group(3))
-                if note in (LOOP_IN, LOOP_OUT) and ch in CHANNELS:
+                if note in NOTES and ch in CHANNELS:
                     (held.add if on else held.discard)((ch, note))
         now = time.time()
         for note, action, hold in ACTIONS:
