@@ -1,5 +1,7 @@
 [Unit]
 Description=BiteDJ FLX4 hold launcher
+# Never stop retrying, no matter how often it restarts
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/usr/bin/python3 %h/bin/bitedj-hold.py

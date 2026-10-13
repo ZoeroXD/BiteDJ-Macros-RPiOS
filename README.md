@@ -25,6 +25,25 @@ cd BiteDJ-On-Off-Macro-with-FLX4
 
 This copies the script to `~/bin/bitedj-hold.py`, installs the user service, and starts it. An existing script is backed up to `~/bin/bitedj-hold.py.bak`.
 
+## Always running
+
+The service is set up to run all the time:
+
+- **Starts at boot:** `install.sh` runs `sudo loginctl enable-linger $USER`, so the user service starts when the Pi boots, not only after you log in.
+- **Restarts on crash:** `Restart=always` with `RestartSec=3` brings it back 3 seconds after any exit.
+- **Never gives up:** `StartLimitIntervalSec=0` stops systemd from disabling it after repeated restarts.
+- **Survives unplugging:** the script reconnects to the FLX4 every 3 seconds when the controller is missing.
+
+Check all of it at once:
+
+```bash
+loginctl show-user "$USER" -p Linger          # Linger=yes
+systemctl --user is-enabled bitedj-hold.service   # enabled
+systemctl --user is-active bitedj-hold.service    # active
+```
+
+BiteDJ itself only opens on screen once the desktop is up, so use desktop autologin (`sudo raspi-config` > System Options > Boot / Auto Login > Desktop Autologin) for a fully hands-free rig.
+
 ## Configure
 
 Edit the top of `~/bin/bitedj-hold.py`, then run `systemctl --user restart bitedj-hold.service`.
