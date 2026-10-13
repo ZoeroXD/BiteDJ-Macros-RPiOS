@@ -1,0 +1,7 @@
+#!/bin/sh
+# Ctrl+Alt+B: start BiteDJ if it is closed, close it if it is open
+if pgrep -x mixxx >/dev/null; then
+  pkill mixxx
+else
+  setsid -f /home/xdj/bitedj/build/mixxx --fullScreen >/dev/null 2>&1 </dev/null
+fi

@@ -7,7 +7,7 @@ StartLimitIntervalSec=0
 ExecStart=/usr/bin/python3 %h/bin/bitedj-hold.py
 Restart=always
 RestartSec=3
-# Restarting this service must never close BiteDJ, the launcher or the desktop it started
+# Restarting this service must never close BiteDJ or anything else it started
 KillMode=process
 Environment=DISPLAY=:0
 Environment=WAYLAND_DISPLAY=wayland-0
