@@ -15,7 +15,7 @@ A small Python script listens to the FLX4 MIDI port with `aseqdump` and runs as 
 - `alsa-utils` (provides `aseqdump`): `sudo apt install alsa-utils`
 - BiteDJ / Mixxx built at `~/bitedj/build/mixxx` (edit `MIXXX` in the script if yours is elsewhere)
 
-## Install
+## Install Steps - Run this Script 
 
 ```bash
 git clone https://github.com/ZoeroXD/BiteDJ-On-Off-Macro-with-FLX4.git
